@@ -140,3 +140,43 @@ char *ht_get( hashtable_t *hashtable, char *key ) {
     }
     
 }
+
+/* List a hash table. */
+void ht_list(hashtable_t *hashtable) {
+    if (NULL == hashtable) { return; }
+    printf("hashtable size: %d\n", hashtable->size);
+
+    int cnt=0;
+    int i;
+
+    for (i = 0; i < hashtable->size; i++) {
+        entry_t *pair = hashtable->table[i];
+        int j = 0;
+        while (pair) {
+            cnt++;
+            printf("__all[%d], %d %s ==== %s\n", cnt, j, pair->key, pair->value);
+            pair = pair->next;
+            j++;
+        }
+    }
+}
+
+/* Clear a hash table. */
+void ht_clear(hashtable_t *hashtable) {
+    if (NULL == hashtable) { return; } 
+    int cnt=0;
+    int i;
+    for (i = 0; i < hashtable->size; i++) {
+        entry_t *pair = hashtable->table[i];
+        int j = 0;
+        while (pair) {
+            cnt++;
+            printf("__all[%d], %d %s ==== %s\n", cnt, j, pair->key, pair->value);
+            entry_t *next = pair->next;
+            free(pair);
+            pair = next;
+            j++;
+        }
+        hashtable->table[i] = NULL;
+    }
+}

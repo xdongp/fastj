@@ -15,6 +15,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
 
 #include "picohttpparser.h"
 #include "hash.h"
@@ -613,7 +614,28 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     return;
 }
 
+void usr1_list_hashtable(int dummy)
+{
+    ht_list(g_dict);
+}
+
+void usr2_reload_config(int dummy)
+{
+    read_config(g_dict, g_config);
+}
+
 int main(int argc, char **argv) {
+	struct sigaction sa = {.sa_flags = 0,};
+
+	sigemptyset(&sa.sa_mask);       /* clear signal set */
+	sigaddset(&sa.sa_mask, SIGUSR1);
+	sigaddset(&sa.sa_mask, SIGUSR2);
+
+	sa.sa_handler = usr1_list_hashtable;
+	sigaction(SIGUSR1, &sa, NULL);
+	sa.sa_handler = usr2_reload_config;
+	sigaction(SIGUSR2, &sa, NULL);
+
 
     char *dev = NULL;            /* capture device name */
     char *send_dev = "em1";

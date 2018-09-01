@@ -33,5 +33,7 @@ void ht_set( hashtable_t *hashtable, char *key, char *value );
 /* Retrieve a key-value pair from a hash table. */
 char *ht_get( hashtable_t *hashtable, char *key );
 
+/* List a hash table. */
+void ht_list(hashtable_t *hashtable);
 
 #endif
