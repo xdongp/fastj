@@ -1,0 +1,8 @@
+*test*
+*.log
+*.ini
+mac
+fastj
+conf/*
+test/*
+back/*
