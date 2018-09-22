@@ -1,2 +1,3 @@
 main: 
-	gcc fastj.c picohttpparser.c hash.c slog.c -o fastj -lpcap -lrt -pthread -O3
+	#gcc fastj.c picohttpparser.c hash.c slog.c -o fastj -lpcap -lrt -pthread -O3
+	gcc mfastj.c queue.c picohttpparser.c hash.c slog.c -o fastj -lpcap -lrt -pthread -O3

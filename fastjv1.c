@@ -25,10 +25,10 @@
 #define BILLION 1000000000L
 
 /*the number of a batch report */
-#define REPORT_BATCH_NUM 1000
+#define REPORT_BATCH_NUM 100000
 
 /* default snap length (maximum bytes per packet to capture) */
-#define SNAP_LEN 1518
+#define MAX_PACKET_LEN 1518
 
 /* read from uri need buffer line */
 #define INPUT_BUF_LEN 1024
@@ -39,10 +39,18 @@
 /* max host length */
 #define MAX_HOST_LEN 32
 
+/* host search len */
+#define MAX_HOST_SEARCH_LEN 40
+
 /* url buffer length, should > MAX_URL_LEN+30 */
 #define URL_BUF_LEN 512
 
-#define PACKET_BUILD_LEN 1600
+/* JS search Length */
+#define SEARCH_JS_LEN 128
+
+
+
+
 
 /*
  * payload buffer length, limit to 512, so url in url.ini will
@@ -57,14 +65,14 @@
 /* Ethernet addresses are 6 bytes */
 #define ETHER_ADDR_LEN    6
 
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+#define min(a, b) (((a) < (b)) ? (a) : (b))
 
 
-u_char g_packet[PACKET_BUILD_LEN];
 hashtable_t *g_dict;
-char g_config[] = "conf/online.ini";
+char g_config[] = "/root/fastj/conf/online.ini";
 
-//u_char g_local_mac[] = {0x00, 0x16, 0x3e, 0x30, 0x7d, 0x82};
-//u_char g_gateway_mac[] = {0xee, 0xff, 0xff, 0xff, 0xff, 0xff};
+
 uint8_t g_local_mac[] = {0xF8, 0xBC, 0x12, 0x38, 0xA7, 0xBC};
 uint8_t g_gateway_mac[] = {0x4c, 0xb1, 0x6c, 0x8b, 0x8f, 0x39};
 
@@ -130,8 +138,8 @@ struct sniff_tcp {
 
 char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url);
 
-//int find_platform(const char *agent, size_t len);
-int find_platform(char *agent, size_t len);
+int find_platform(const char *agent, size_t len);
+//int find_platform(char *agent, size_t len);
 
 int get_http_header(const char *header, size_t header_len, http_header_t *http_header);
 
@@ -158,24 +166,6 @@ uint16_t tcp_chksum(uint16_t initcksum, uint8_t *tcphead, int tcplen, uint32_t *
 char *trim(char *str);
 
 int str2mac(const char *macaddr, unsigned char mac[6]);
-
-void debug_printf(const char *format, ...);
-
-void debug_printf(const char *format, ...) {
-    va_list arglist;
-
-    time_t rawtime;
-    struct tm *timeinfo;
-
-    time(&rawtime);
-    timeinfo = localtime(&rawtime);
-
-    printf("%.24s: ", asctime(timeinfo));
-
-    va_start(arglist, format);
-    vprintf(format, arglist);
-    va_end(arglist);
-}
 
 
 int str2mac(const char *macaddr, unsigned char mac[6]) {
@@ -243,13 +233,13 @@ uint16_t tcp_chksum(uint16_t initcksum, uint8_t *tcphead, int tcplen, uint32_t *
 }
 
 
-char *trim(char *str){
+char *trim(char *str) {
     char *p = str;
     char *p1;
-    if(p){
+    if (p) {
         p1 = p + strlen(str) - 1;
-        while(*p && isspace(*p)) p++;
-        while(p1 > p && isspace(*p1)) *p1-- = '\0';
+        while (*p && isspace(*p)) p++;
+        while (p1 > p && isspace(*p1)) *p1-- = '\0';
     }
     return p;
 }
@@ -292,10 +282,8 @@ void read_config(hashtable_t *hash, char *config) {
     }
 }
 
-
-
 /* platform: 0: all,  1, android, 2, ios, 3, mobile, 4, pc */
-/*int find_platform(const char *agent, size_t len) {
+int find_platform(const char *agent, size_t len) {
     if (memmem(agent,len, "iPhone", 6) != NULL) {
         return 1;
     }
@@ -305,22 +293,22 @@ void read_config(hashtable_t *hash, char *config) {
     }
 
     return 4;
-}*/
+}
 
 /* platform: 0: all,  1, android, 2, ios, 3, mobile, 4, pc */
 /* strstr is faster than memme, and match will not at the end*/
-int find_platform(char *agent, size_t len) {
-    agent[len-1] = '\0';
+/*int find_platform(char *agent, size_t len) {
+    agent[len - 1] = '\0';
     if (strstr(agent, "iPhone") != NULL) {
         return 1;
     }
 
-    if (strstr(agent, "Android") != NULL ) {
+    if (strstr(agent, "Android") != NULL) {
         return 2;
     }
 
     return 4;
-}
+}*/
 
 char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url) {
     elem_t *elem = NULL;
@@ -332,8 +320,8 @@ char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url) {
     }
 
     // if have "bro=", skip
-    if(strstr(header->path, "bro=") != NULL){
-        slog_info(2, "host: %s, path: %s , has bro, skip", header->host, header->path);
+    if (strstr(header->path, "bro=") != NULL) {
+        slog_debug(4, "host: %s, path: %s , has bro, skip", header->host, header->path);
         return NULL;
     }
 
@@ -627,113 +615,142 @@ int build_packet(u_char *packet, char *relocation_url) {
  */
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
     /* declare pointers to packet headers */
-    const struct sniff_ip *ip;              /* The IP header */
-    const struct sniff_tcp *tcp;            /* The TCP header */
-    const char *payload;                    /* Packet payload */
-    char *relocation_url;
-    char url_buf[URL_BUF_LEN];
+    const struct sniff_ip *ip;
+    const struct sniff_tcp *tcp;
+    const u_char *payload;
+    u_char *relocation_url;
+    u_char url_buf[URL_BUF_LEN];
+    u_char pkt_buf[MAX_PACKET_LEN];
+    u_char host_buf[MAX_HOST_LEN];
     http_header_t req_http_header;
-    int size_ip;
-    int size_tcp;
-    int size_payload;
-    int size_packet;
-    int size_send;
+    size_t size_ip;
+    size_t size_tcp;
+    size_t size_payload;
+    size_t size_packet;
+    size_t size_send;
+
 
     /* qps handle */
     static int count = 0;
+    static int match = 0, old_match = 0;
     static struct timespec old;
     static struct timespec new;
-    uint64_t diff_nsec = 0;
-    time_t ltime;
 
     if (count % REPORT_BATCH_NUM == 0) {
         clock_gettime(CLOCK_MONOTONIC, &new);
         if (count != 0) {
-            diff_nsec = (BILLION * (new.tv_sec - old.tv_sec));
+            float diff_nsec = (BILLION * (new.tv_sec - old.tv_sec));
             diff_nsec += new.tv_nsec - old.tv_nsec;
             float diff_sec = diff_nsec * 1e-9;
             float rate = REPORT_BATCH_NUM / diff_sec;
-            ltime = time(NULL);
-            slog_info(2, "count:%d, rate:%.3f\n",  count, rate);
+            float match_rate = (match - old_match) / diff_sec;
+            old_match = match;
+            slog_info(2, "count:%d, rate:%.3f  match:%d, mrate:%.3f", count, rate, match, match_rate);
         }
         old = new;
     }
     count++;
 
-    /* packet send handle */
-    pcap_t *handle = (pcap_t *) args;
 
-    //memset(req_url, 0 ,URL_BUF_LEN);
-
-    /* define/compute ip header offset */
     ip = (struct sniff_ip *) (packet + SIZE_ETHERNET);
     size_ip = IP_HL(ip) * 4;
     if (size_ip < 20) {
-        printf("   * Invalid IP header length: %u bytes\n", size_ip);
+        slog_debug(4, "  * Invalid IP header length: %u bytes", size_ip);
         return;
     }
 
-    /* print source and destination IP addresses */
-    slog_debug(4, "       From: %s", inet_ntoa(ip->ip_src));
-    slog_debug(4, "         To: %s", inet_ntoa(ip->ip_dst));
-
-
-    /* define/compute tcp header offset */
     tcp = (struct sniff_tcp *) (packet + SIZE_ETHERNET + size_ip);
     size_tcp = TH_OFF(tcp) * 4;
 
-    if (size_tcp < 20) {
-        slog_warn(1, "   * Invalid TCP header length: %u bytes", size_tcp);
+    payload = (char *) (packet + SIZE_ETHERNET + size_ip + size_tcp);
+
+
+    size_packet = ntohs(ip->ip_len) + SIZE_ETHERNET;
+    if (size_packet > MAX_PACKET_LEN) {
+        slog_debug(4, "pkt size is too long , size :%d", size_packet);
+        return;
+    }
+
+    /* compute tcp payload (segment) size */
+    size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
+    if (size_payload <= 0) {
         return;
     }
 
 
-    slog_debug(4, "   Src port: %d", ntohs(tcp->th_sport));
-    slog_debug(4, "   Dst port: %d", ntohs(tcp->th_dport));
-
-    /* define/compute tcp payload (segment) offset */
-    payload = (char *) (packet + SIZE_ETHERNET + size_ip + size_tcp);
-
-    /* compute tcp payload (segment) size */
-    size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
-
-    size_packet = SIZE_ETHERNET + size_ip + size_tcp + size_payload;
-    if (size_payload > 0) {
-        slog_debug(4, "   Payload (%d bytes):", size_payload);
-
-
-        // get http header
-        int req = get_http_header(payload, size_payload, &req_http_header);
-        if (req < 0) {
-            slog_debug(4, " http header parse error");
+    /* fast search js and host, if not match, return */
+    size_t size_search = min(SEARCH_JS_LEN, size_payload);
+    if (memmem(payload, size_search, "js", 2) == NULL ) {
+        return;
+    } else {
+        u_char *p_host_buf, *p_search_tmp, *p_search_end;
+        p_search_tmp = memmem(payload, size_payload, "Host:", 5);
+        if (p_search_tmp == NULL) {
             return;
         }
-        slog_info(2, "Host: %s, Path: %s, Platform: %d", req_http_header.host,
-                  req_http_header.path, req_http_header.platform)
 
+        /* search host field, fast match */
+        p_host_buf = host_buf;
 
-        // get relocation url
-        // 1, hash domain, 2, reg search path,  3, match platform
-        relocation_url = get_relocation_url(g_dict, &req_http_header, url_buf);
-        //slog_debug(4, "relocation_url:%s\n", relocation_url);
-
-        if (relocation_url == NULL) {
-            return;
-        }
-        slog_info(2, "relocation_url:%s", relocation_url);
-
-        memset(g_packet, PACKET_BUILD_LEN, 0);
-        memcpy(g_packet, packet, size_packet);
-        size_send = build_packet(g_packet, relocation_url);
-        if (size_send > 0) {
-            int send_ret = pcap_sendpacket(handle, g_packet, size_send);
-            if (send_ret == 0) {
-                slog_debug(3, "send packat succ");
+        /* skip the first 5 byte (Host:)*/
+        p_search_tmp += 5;
+        p_search_end = payload + size_payload;
+        p_search_end = min((p_search_tmp + MAX_HOST_SEARCH_LEN - 1), p_search_end);
+        while (*p_search_tmp != '\r' && *p_search_tmp != '\n' && p_search_tmp < p_search_end) {
+            if (isspace(*p_search_tmp)) {
+                p_search_tmp++;
             } else {
-                slog_debug(3, "send packat fail");
+                *p_host_buf++ = *p_search_tmp++;
             }
         }
+        *p_host_buf = '\0';
+        slog_debug(4, "host:%s\n", host_buf);
+        elem_t *elem = ht_get(g_dict, host_buf);
 
+        /* if not match host, return */
+        if (elem == NULL) {
+            return;
+        }
+    }
+
+
+    /* packet send handle */
+    pcap_t *handle = (pcap_t *) args;
+
+
+    slog_debug(4, "   Payload (%d bytes):", size_payload);
+
+    // get http header
+    int req = get_http_header(payload, size_payload, &req_http_header);
+    if (req < 0) {
+        slog_debug(4, " http header parse error");
+        return;
+    }
+    slog_debug(4, "Host: %s, Path: %s, Platform: %d", req_http_header.host,
+              req_http_header.path, req_http_header.platform)
+
+
+    // get relocation url
+    // 1, hash domain, 2, reg search path,  3, match platform
+    relocation_url = get_relocation_url(g_dict, &req_http_header, url_buf);
+    //slog_debug(4, "relocation_url:%s\n", relocation_url);
+
+    if (relocation_url == NULL) {
+        return;
+    }
+    slog_debug(4, "relocation_url:%s", relocation_url);
+
+    match++;
+    memset(pkt_buf, MAX_PACKET_LEN, 0);
+    memcpy(pkt_buf, packet, size_packet);
+    size_send = build_packet(pkt_buf, relocation_url);
+    if (size_send > 0) {
+        int send_ret = pcap_sendpacket(handle, pkt_buf, size_send);
+        if (send_ret == 0) {
+            slog_debug(4, "send packat succ");
+        } else {
+            slog_debug(4, "send packat fail");
+        }
     }
 
     return;
@@ -772,7 +789,9 @@ int main(int argc, char **argv) {
     char errbuf[PCAP_ERRBUF_SIZE];        /* error buffer */
     pcap_t *handle, *send_handle;                /* packet capture handle */
 
-    char filter_exp[] = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";
+    char filter_exp[256];
+    char *filter_base = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";
+    char *filter_seg;
     struct bpf_program fp;            /* compiled filter program (expression) */
     bpf_u_int32 net = 0;            /* ip */
     int num_packets = -1;            /* number of packets to capture */
@@ -783,12 +802,18 @@ int main(int argc, char **argv) {
     slog_init("fastj", NULL, 2, 3, 1);
 
     /* check for capture device name on command-line */
-    if (argc == 5) {
+    if (argc >= 5) {
         // Usage: fastj capdev senddev sendmac gatemac
         cap_dev = argv[1];
         send_dev = argv[2];
         send_mac = argv[3];
         gate_mac = argv[4];
+        if(argc==6){
+            filter_seg = argv[5];
+            sprintf(filter_exp, "%s and ip[15]&0x03 == %s", filter_base, filter_seg);
+        }else{
+            sprintf(filter_exp, "%s", filter_base);
+        }
     } else {
         print_app_usage();
         exit(EXIT_FAILURE);
@@ -816,14 +841,14 @@ int main(int argc, char **argv) {
     read_config(g_dict, g_config);
 
     /* open capture device */
-    handle = pcap_open_live(cap_dev, SNAP_LEN, 1, 1000, errbuf);
+    handle = pcap_open_live(cap_dev, MAX_PACKET_LEN, 1, 1000, errbuf);
     if (handle == NULL) {
         slog_error(1, "Couldn't open device %s: %s", cap_dev, errbuf);
         exit(EXIT_FAILURE);
     }
 
     /* open send device */
-    send_handle = pcap_open_live(send_dev, SNAP_LEN, 1, 1000, errbuf);
+    send_handle = pcap_open_live(send_dev, MAX_PACKET_LEN, 1, 1000, errbuf);
     if (send_handle == NULL) {
         slog_error(1, "Couldn't open device %s: %s", cap_dev, errbuf);
         exit(EXIT_FAILURE);

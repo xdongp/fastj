@@ -21,6 +21,8 @@
 #include "picohttpparser.h"
 #include "hash.h"
 #include "slog.h"
+#include "queue.h"
+
 
 #define BILLION 1000000000L
 
@@ -44,6 +46,13 @@
 
 #define PACKET_BUILD_LEN 1600
 
+#define MAX_QUEUE_SIZE 1024
+
+#define BUF_QUEUE_SIZE (1024+MAX_QUEUE_SIZE)
+
+#define WORK_NUM 4
+
+
 /*
  * payload buffer length, limit to 512, so url in url.ini will
  * be less than 512-50(the length of other in the 302 header)
@@ -59,9 +68,10 @@
 
 
 
-u_char g_packet[PACKET_BUILD_LEN];
 hashtable_t *g_dict;
 char g_config[] = "conf/online.ini";
+pthread_mutex_t g_mutex;
+
 
 //u_char g_local_mac[] = {0x00, 0x16, 0x3e, 0x30, 0x7d, 0x82};
 //u_char g_gateway_mac[] = {0xee, 0xff, 0xff, 0xff, 0xff, 0xff};
@@ -127,19 +137,24 @@ struct sniff_tcp {
     u_short th_urp;                 /* urgent pointer */
 };
 
+typedef  struct work_queues {
+    struct DSQueue *pkt_queue;
+    struct DSQueue *buf_queue;
+}work_queues_t;
+
+typedef  struct send_work_args {
+    work_queues_t *wqueues;
+    pcap_t *send_handle;
+    int id;
+}send_work_args_t;
 
 char *get_relocation_url(hashtable_t *dict, http_header_t *header, char *url);
 
-//int find_platform(const char *agent, size_t len);
 int find_platform(char *agent, size_t len);
 
 int get_http_header(const char *header, size_t header_len, http_header_t *http_header);
 
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
-
-void print_payload(const u_char *payload, int len);
-
-void print_hex_ascii_line(const u_char *payload, int len, int offset);
 
 void print_app_banner(void);
 
@@ -148,6 +163,10 @@ void print_app_usage(void);
 void swap_bytes(void *a, void *b, size_t width);
 
 int build_packet(u_char *packet, char *relocation_url);
+
+void thread_handle_packet(void *args);
+
+void go_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet);
 
 void read_config(hashtable_t *hash, char *config);
 
@@ -158,25 +177,6 @@ uint16_t tcp_chksum(uint16_t initcksum, uint8_t *tcphead, int tcplen, uint32_t *
 char *trim(char *str);
 
 int str2mac(const char *macaddr, unsigned char mac[6]);
-
-void debug_printf(const char *format, ...);
-
-void debug_printf(const char *format, ...) {
-    va_list arglist;
-
-    time_t rawtime;
-    struct tm *timeinfo;
-
-    time(&rawtime);
-    timeinfo = localtime(&rawtime);
-
-    printf("%.24s: ", asctime(timeinfo));
-
-    va_start(arglist, format);
-    vprintf(format, arglist);
-    va_end(arglist);
-}
-
 
 int str2mac(const char *macaddr, unsigned char mac[6]) {
     unsigned int m[6];
@@ -194,7 +194,6 @@ int str2mac(const char *macaddr, unsigned char mac[6]) {
         return 0;
     }
 }
-
 
 uint16_t ip_chksum(uint16_t initcksum, uint8_t *ptr, int len) {
     unsigned int cksum;
@@ -288,7 +287,7 @@ void read_config(hashtable_t *hash, char *config) {
         fclose(file);
         slog_info(2, "load %s finished, total item: %d", config, count);
     } else {
-        slog_error(1, "file %s not exist!", config);
+        slog_error(0, "file %s not exist!", config);
     }
 }
 
@@ -421,98 +420,6 @@ void print_app_usage(void) {
     printf("Usage: fastj capdev senddev sendmac gatemac\n");
 }
 
-/*
- * print data in rows of 16 bytes: offset   hex   ascii
- *
- * 00000   47 45 54 20 2f 20 48 54  54 50 2f 31 2e 31 0d 0a   GET / HTTP/1.1..
- */
-void print_hex_ascii_line(const u_char *payload, int len, int offset) {
-
-    int i;
-    int gap;
-    const u_char *ch;
-
-    /* offset */
-    printf("%05d   ", offset);
-
-    /* hex */
-    ch = payload;
-    for (i = 0; i < len; i++) {
-        printf("%02x ", *ch);
-        ch++;
-        /* print extra space after 8th byte for visual aid */
-        if (i == 7)
-            printf(" ");
-    }
-    /* print space to handle line less than 8 bytes */
-    if (len < 8)
-        printf(" ");
-
-    /* fill hex gap with spaces if not full line */
-    if (len < 16) {
-        gap = 16 - len;
-        for (i = 0; i < gap; i++) {
-            printf("   ");
-        }
-    }
-    printf("   ");
-
-    /* ascii (if printable) */
-    ch = payload;
-    for (i = 0; i < len; i++) {
-        if (isprint(*ch))
-            printf("%c", *ch);
-        else
-            printf(".");
-        ch++;
-    }
-
-    printf("\n");
-
-    return;
-}
-
-/*
- * print packet payload data (avoid printing binary data)
- */
-void print_payload(const u_char *payload, int len) {
-
-    int len_rem = len;
-    int line_width = 16;            /* number of bytes per line */
-    int line_len;
-    int offset = 0;                    /* zero-based offset counter */
-    const u_char *ch = payload;
-
-    if (len <= 0)
-        return;
-
-    /* data fits on one line */
-    if (len <= line_width) {
-        print_hex_ascii_line(ch, len, offset);
-        return;
-    }
-
-    /* data spans multiple lines */
-    for (;;) {
-        /* compute current line length */
-        line_len = line_width % len_rem;
-        /* print line */
-        print_hex_ascii_line(ch, line_len, offset);
-        /* compute total remaining */
-        len_rem = len_rem - line_len;
-        /* shift pointer to remaining bytes to print */
-        ch = ch + line_len;
-        /* add offset */
-        offset = offset + line_width;
-        /* check if we have line width chars or less */
-        if (len_rem <= line_width) {
-            /* print last line and get out */
-            print_hex_ascii_line(ch, len_rem, offset);
-            break;
-        }
-    }
-}
-
 
 void swap_bytes(void *a, void *b, size_t width) {
     char *v1 = (char *) a;
@@ -538,12 +445,9 @@ int build_packet(u_char *packet, char *relocation_url) {
     u_int16_t sport, dport, sum;
     u_int32_t seq, ack;
 
-    // memset
-    //memset(payload302, 0, PAYLOAD_BUF_LEN);
 
     // set mac
     ethernet = (struct sniff_ethernet *) (packet);
-    //swap_bytes(ethernet->ether_dhost, ethernet->ether_shost, ETHER_ADDR_LEN);
     memcpy(ethernet->ether_dhost, g_gateway_mac, ETHER_ADDR_LEN);
     memcpy(ethernet->ether_shost, g_local_mac, ETHER_ADDR_LEN);
     slog_debug(4, "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -597,7 +501,6 @@ int build_packet(u_char *packet, char *relocation_url) {
 
     // set payload
     new_size_payload = sprintf(payload302,
-    //"HTTP/1.1 302 Found\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                                "HTTP/1.1 302 Moved Temporarily\r\nServer: nginx/1.0\r\nLocation: %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n\r\n\r\n",
                                relocation_url);
     new_size_payload--;
@@ -622,24 +525,12 @@ int build_packet(u_char *packet, char *relocation_url) {
     return packet_len;
 }
 
-/*
- * dissect/print packet
- */
 void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
-    /* declare pointers to packet headers */
-    const struct sniff_ip *ip;              /* The IP header */
-    const struct sniff_tcp *tcp;            /* The TCP header */
-    const char *payload;                    /* Packet payload */
-    char *relocation_url;
-    char url_buf[URL_BUF_LEN];
-    http_header_t req_http_header;
-    int size_ip;
-    int size_tcp;
-    int size_payload;
-    int size_packet;
-    int size_send;
+    size_t size_pkt, size_ip;
+    void *pkt_buf = NULL;
+    const struct sniff_ip *ip;
+    work_queues_t *wqueues = (work_queues_t *) args;
 
-    /* qps handle */
     static int count = 0;
     static struct timespec old;
     static struct timespec new;
@@ -660,83 +551,131 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     }
     count++;
 
-    /* packet send handle */
-    pcap_t *handle = (pcap_t *) args;
+    if(ds_queue_length(wqueues->pkt_queue) == MAX_QUEUE_SIZE){
+        slog_warn(1, "queue full, drop packet");
+        return ;
+    }
 
-    //memset(req_url, 0 ,URL_BUF_LEN);
-
-    /* define/compute ip header offset */
     ip = (struct sniff_ip *) (packet + SIZE_ETHERNET);
     size_ip = IP_HL(ip) * 4;
     if (size_ip < 20) {
-        printf("   * Invalid IP header length: %u bytes\n", size_ip);
-        return;
+        slog_warn(1, "  * Invalid IP header length: %u bytes", size_ip);
+        return ;
     }
 
-    /* print source and destination IP addresses */
-    slog_debug(4, "       From: %s", inet_ntoa(ip->ip_src));
-    slog_debug(4, "         To: %s", inet_ntoa(ip->ip_dst));
-
-
-    /* define/compute tcp header offset */
-    tcp = (struct sniff_tcp *) (packet + SIZE_ETHERNET + size_ip);
-    size_tcp = TH_OFF(tcp) * 4;
-
-    if (size_tcp < 20) {
-        slog_warn(1, "   * Invalid TCP header length: %u bytes", size_tcp);
-        return;
+    size_pkt = ntohs(ip->ip_len) + SIZE_ETHERNET;
+    if(size_pkt > SNAP_LEN){
+        slog_warn(1, "pkt size is too long , size :%d", size_pkt);
+        return ;
     }
 
+    slog_info(2, "get_packet , len:%d", size_pkt);
+    // get buffer from buffer_queue
+    pkt_buf = ds_queue_get(wqueues->buf_queue);
+    if(pkt_buf != NULL){
+        memcpy(pkt_buf, packet, size_pkt);
+        ds_queue_put(wqueues->pkt_queue, pkt_buf);
+    } else{
+        slog_error(0, "get pkt buffer error");
+    }
+    return ;
+}
 
-    slog_debug(4, "   Src port: %d", ntohs(tcp->th_sport));
-    slog_debug(4, "   Dst port: %d", ntohs(tcp->th_dport));
+/*
+ * thread handle packet
+ */
+//void thread_handle_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *packet) {
+void thread_handle_packet(void *args) {
+    send_work_args_t *work_args  = (send_work_args_t *) args;
 
-    /* define/compute tcp payload (segment) offset */
-    payload = (char *) (packet + SIZE_ETHERNET + size_ip + size_tcp);
+    u_char *packet = NULL;
+    const struct sniff_ip *ip;              /* The IP header */
+    const struct sniff_tcp *tcp;            /* The TCP header */
+    const char *payload;                    /* Packet payload */
+    char *relocation_url;
+    char url_buf[URL_BUF_LEN];
+    http_header_t req_http_header;
+    int size_ip;
+    int size_tcp;
+    int size_payload;
+    int size_packet;
+    int size_send;
 
-    /* compute tcp payload (segment) size */
-    size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
+    while (1) {
+        packet = ds_queue_get(work_args->wqueues->pkt_queue);
 
-    size_packet = SIZE_ETHERNET + size_ip + size_tcp + size_payload;
-    if (size_payload > 0) {
-        slog_debug(4, "   Payload (%d bytes):", size_payload);
+        /* define/compute ip header offset */
+        ip = (struct sniff_ip *) (packet + SIZE_ETHERNET);
+        size_ip = IP_HL(ip) * 4;
+
+        /* print source and destination IP addresses */
+        slog_debug(4, "       From: %s", inet_ntoa(ip->ip_src));
+        slog_debug(4, "         To: %s", inet_ntoa(ip->ip_dst));
 
 
-        // get http header
-        int req = get_http_header(payload, size_payload, &req_http_header);
-        if (req < 0) {
-            slog_debug(4, " http header parse error");
-            return;
+        /* define/compute tcp header offset */
+        tcp = (struct sniff_tcp *) (packet + SIZE_ETHERNET + size_ip);
+        size_tcp = TH_OFF(tcp) * 4;
+
+        if (size_tcp < 20) {
+            slog_warn(1, "   * Invalid TCP header length: %u bytes", size_tcp);
+            goto free_pkt_buf;
         }
-        slog_info(2, "Host: %s, Path: %s, Platform: %d", req_http_header.host,
-                  req_http_header.path, req_http_header.platform)
 
 
-        // get relocation url
-        // 1, hash domain, 2, reg search path,  3, match platform
-        relocation_url = get_relocation_url(g_dict, &req_http_header, url_buf);
-        //slog_debug(4, "relocation_url:%s\n", relocation_url);
+        slog_debug(4, "   Src port: %d", ntohs(tcp->th_sport));
+        slog_debug(4, "   Dst port: %d", ntohs(tcp->th_dport));
 
-        if (relocation_url == NULL) {
-            return;
-        }
-        slog_info(2, "relocation_url:%s", relocation_url);
+        /* define/compute tcp payload (segment) offset */
+        payload = (char *) (packet + SIZE_ETHERNET + size_ip + size_tcp);
 
-        memset(g_packet, PACKET_BUILD_LEN, 0);
-        memcpy(g_packet, packet, size_packet);
-        size_send = build_packet(g_packet, relocation_url);
-        if (size_send > 0) {
-            int send_ret = pcap_sendpacket(handle, g_packet, size_send);
-            if (send_ret == 0) {
-                slog_debug(3, "send packat succ");
-            } else {
-                slog_debug(3, "send packat fail");
+        /* compute tcp payload (segment) size */
+        size_payload = ntohs(ip->ip_len) - (size_ip + size_tcp);
+
+        size_packet = SIZE_ETHERNET + size_ip + size_tcp + size_payload;
+        if (size_payload > 0) {
+            slog_debug(4, "   Payload (%d bytes):", size_payload);
+
+
+            // get http header
+            int req = get_http_header(payload, size_payload, &req_http_header);
+            if (req < 0) {
+                slog_debug(4, " http header parse error");
+                goto free_pkt_buf;
             }
+            slog_info(2, "Host: %s, Path: %s, Platform: %d", req_http_header.host,
+                      req_http_header.path, req_http_header.platform)
+
+
+            // get relocation url
+            // 1, hash domain, 2, reg search path,  3, match platform
+            relocation_url = get_relocation_url(g_dict, &req_http_header, url_buf);
+            //slog_debug(4, "relocation_url:%s\n", relocation_url);
+
+            if (relocation_url == NULL) {
+                goto free_pkt_buf;
+            }
+            slog_info(2, "[t%d] relocation_url:%s", work_args->id, relocation_url);
+
+            //memset(g_packet, PACKET_BUILD_LEN, 0);
+            //memcpy(g_packet, packet, size_packet);
+            size_send = build_packet(packet, relocation_url);
+            if (size_send > 0) {
+                pthread_mutex_lock(&g_mutex);
+                int send_ret = pcap_sendpacket(work_args->send_handle, packet, size_send);
+                pthread_mutex_unlock(&g_mutex);
+                if (send_ret == 0) {
+                    slog_debug(3, "send packat succ");
+                } else {
+                    slog_debug(3, "send packat fail");
+                }
+            }
+
         }
+        free_pkt_buf:
+            ds_queue_put(work_args->wqueues->buf_queue, packet);
 
     }
-
-    return;
 }
 
 void usr1_list_hashtable(int dummy) {
@@ -764,13 +703,19 @@ int main(int argc, char **argv) {
     sa.sa_handler = usr2_reload_config;
     sigaction(SIGUSR2, &sa, NULL);
 
-
+    int i;
+    void *tmp = NULL;
     char *cap_dev = NULL;            /* capture device name */
     char *send_dev = NULL;
     char *send_mac = NULL;
     char *gate_mac = NULL;
     char errbuf[PCAP_ERRBUF_SIZE];        /* error buffer */
     pcap_t *handle, *send_handle;                /* packet capture handle */
+    struct DSQueue *pkt_queue, *buf_queue;
+    work_queues_t *wqueues;
+    send_work_args_t work_args[WORK_NUM];
+    pthread_t tid[WORK_NUM];
+
 
     char filter_exp[] = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";
     struct bpf_program fp;            /* compiled filter program (expression) */
@@ -781,6 +726,7 @@ int main(int argc, char **argv) {
 
     // init log
     slog_init("fastj", NULL, 2, 3, 1);
+
 
     /* check for capture device name on command-line */
     if (argc == 5) {
@@ -801,16 +747,48 @@ int main(int argc, char **argv) {
     slog_info(2, "Number of packets: %d", num_packets);
     slog_info(2, "Filter expression: %s", filter_exp);
 
+
     if (str2mac(send_mac, g_local_mac) < 0) {
-        slog_error(1, "Paser send mac error, mac: %s", send_mac);
+        slog_error(0, "Paser send mac error, mac: %s", send_mac);
         exit(EXIT_FAILURE);
     }
 
     if (str2mac(gate_mac, g_gateway_mac) < 0) {
-        slog_error(1, "Paser gateway mac error, mac: %s", gate_mac);
+        slog_error(0, "Paser gateway mac error, mac: %s", gate_mac);
         exit(EXIT_FAILURE);
     }
 
+    wqueues = (work_queues_t *)malloc(sizeof(work_queues_t));
+    if(wqueues == NULL){
+        slog_error(0, "create work queues queue error");
+        exit(EXIT_FAILURE);
+    }
+
+    slog_info(2, "create pkt queue, size :%d", MAX_QUEUE_SIZE);
+    pkt_queue = ds_queue_create(MAX_QUEUE_SIZE);
+    if(pkt_queue == NULL){
+        slog_error(0, "create pkt queue error");
+        exit(EXIT_FAILURE);
+    }
+    wqueues->pkt_queue = pkt_queue;
+
+
+    buf_queue = ds_queue_create(BUF_QUEUE_SIZE);
+    if(buf_queue == NULL){
+        slog_error(0, "create pkt queue error");
+        exit(EXIT_FAILURE);
+    }
+
+    // create buffer queue
+    for(i=0; i< BUF_QUEUE_SIZE; i++){
+        tmp =malloc(PACKET_BUILD_LEN);
+        if(tmp == NULL){
+            slog_error(0, "malloc buffer queue error");
+            exit(EXIT_FAILURE);
+        }
+        ds_queue_put(buf_queue, tmp);
+    }
+    wqueues->buf_queue = buf_queue;
 
     g_dict = ht_create(65536);
     read_config(g_dict, g_config);
@@ -818,34 +796,49 @@ int main(int argc, char **argv) {
     /* open capture device */
     handle = pcap_open_live(cap_dev, SNAP_LEN, 1, 1000, errbuf);
     if (handle == NULL) {
-        slog_error(1, "Couldn't open device %s: %s", cap_dev, errbuf);
+        slog_error(0, "Couldn't open device %s: %s", cap_dev, errbuf);
         exit(EXIT_FAILURE);
     }
 
-    /* open send device */
-    send_handle = pcap_open_live(send_dev, SNAP_LEN, 1, 1000, errbuf);
-    if (send_handle == NULL) {
-        slog_error(1, "Couldn't open device %s: %s", cap_dev, errbuf);
-        exit(EXIT_FAILURE);
-    }
+
 
     /* compile the filter expression */
     if (pcap_compile(handle, &fp, filter_exp, 0, net) == -1) {
-        slog_error(1, "Couldn't parse filter %s: %s",
+        slog_error(0, "Couldn't parse filter %s: %s",
                    filter_exp, pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
 
     /* apply the compiled filter */
     if (pcap_setfilter(handle, &fp) == -1) {
-        slog_error(1, "Couldn't install filter %s: %s",
+        slog_error(0, "Couldn't install filter %s: %s",
                    filter_exp, pcap_geterr(handle));
         exit(EXIT_FAILURE);
     }
 
+    if (0 != (errno = pthread_mutex_init(&g_mutex, NULL))) {
+        fprintf(stderr, "Could not create mutex. Errno: %d\n", errno);
+        exit(1);
+    }
+
+    send_handle = pcap_open_live(send_dev, SNAP_LEN, 1, 1000, errbuf);
+    if (send_handle == NULL) {
+        slog_error(0, "Couldn't open device %s: %s", cap_dev, errbuf);
+        exit(EXIT_FAILURE);
+    }
+
+    for(i=0; i<WORK_NUM; i++){
+        work_args[i].id = i;
+        work_args[i].wqueues = wqueues;
+        /* open send device */
+        work_args[i].send_handle = send_handle;
+        pthread_create(&tid[i], NULL, thread_handle_packet, &work_args);
+
+    }
+
     slog_info(2, "start inject...");
     /* now we can set our callback function */
-    pcap_loop(handle, num_packets, got_packet, (u_char *) send_handle);
+    pcap_loop(handle, num_packets, got_packet, (u_char *) wqueues);
 
     /* cleanup */
     pcap_freecode(&fp);

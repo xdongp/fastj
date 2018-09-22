@@ -345,6 +345,7 @@ void slog(int level, int flag, const char *msg, ...)
             if (level <= slg.level)
             {
                 printf("%s", slog_get(&mdate, "%s\n", prints));
+                fflush(stdout);
             }
         }
 
