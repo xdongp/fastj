@@ -633,6 +633,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     /* qps handle */
     static int count = 0;
     static int match = 0, old_match = 0;
+    static int js_match = 0, js_old_match = 0;
     static struct timespec old;
     static struct timespec new;
 
@@ -644,8 +645,10 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
             float diff_sec = diff_nsec * 1e-9;
             float rate = REPORT_BATCH_NUM / diff_sec;
             float match_rate = (match - old_match) / diff_sec;
+            float js_match_rate = (js_match - js_old_match) / diff_sec;
             old_match = match;
-            slog_info(2, "count:%d, rate:%.3f  match:%d, mrate:%.3f", count, rate, match, match_rate);
+            js_old_match = js_match;
+            slog_info(2, "count:%d, rate:%.3f js_rate:%.3f, match:%d, mrate:%.3f", count, rate, js_match_rate, match, match_rate);
         }
         old = new;
     }
@@ -683,6 +686,7 @@ void got_packet(u_char *args, const struct pcap_pkthdr *header, const u_char *pa
     if (memmem(payload, size_search, "js", 2) == NULL ) {
         return;
     } else {
+	js_match++;
         u_char *p_host_buf, *p_search_tmp, *p_search_end;
         p_search_tmp = memmem(payload, size_payload, "Host:", 5);
         if (p_search_tmp == NULL) {
@@ -790,7 +794,8 @@ int main(int argc, char **argv) {
     pcap_t *handle, *send_handle;                /* packet capture handle */
 
     char filter_exp[256];
-    char *filter_base = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";
+    //char *filter_base = "tcp dst  port 80  and tcp[tcpflags] & tcp-push == tcp-push";
+    char *filter_base = "tcp[tcpflags] & tcp-push == tcp-push";
     char *filter_seg;
     struct bpf_program fp;            /* compiled filter program (expression) */
     bpf_u_int32 net = 0;            /* ip */

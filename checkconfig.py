@@ -27,7 +27,7 @@ def save_cache(length):
 
 def reload():
     cmd = "killall -9 fastjv1"
-    os.system()
+    os.system(cmd)
 
 def check(url):
     cmd = "curl -s -I %s|grep Length" % url
