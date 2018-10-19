@@ -2,8 +2,9 @@ import os
 import json
 import urllib2
 
-URL = "http://adp.brocdn.com:9999/netads/api/getInterceptRules?from=527691484216954880"
-OUT = "conf/out.ini"
+#URL = "http://adp.brocdn.com:9999/netads/api/getInterceptRules?from=527691484216954880"
+URL = "http://adp.brocdn.com:9999/netads/api/getInterceptRules?from=569230400153456640"
+OUT = "conf/online.ini"
 CACHE = "conf/.cache"
 
 def read_cache():
@@ -25,7 +26,7 @@ def save_cache(length):
     fd.close()
 
 def reload():
-    cmd = "killall -USR2 fastj"
+    cmd = "killall -9 fastjv1"
     os.system()
 
 def check(url):
@@ -44,6 +45,7 @@ def check(url):
         parse(url)
         print "parse ok , reload it to fastj... "
         #reload it
+        reload()
         print "load it ok, save cache"
         save_cache(length)
     else:
